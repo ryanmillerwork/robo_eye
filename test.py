@@ -17,6 +17,17 @@ try:
     srv.setPosition(ch, 90.0);  time.sleep(1)
     srv.setPosition(ch, 45.0);  time.sleep(1)
     srv.setEngaged(ch, False)
+
+    ch = 0
+    srv.setSpeedRampingOn(ch, True)
+    srv.setAcceleration(ch, 50.0)
+    srv.setVelocityLimit(ch, 100.0)
+
+    srv.setEngaged(ch, True)
+    srv.setPosition(ch, 90.0);  time.sleep(1)
+    srv.setPosition(ch, 45.0);  time.sleep(1)
+    srv.setEngaged(ch, False)
+    
 finally:
     try:
         srv.closePhidget()
