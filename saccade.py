@@ -28,7 +28,7 @@ TILT_CHANNEL = 1  # Y-axis (vertical movement)
 class SaccadeController:
     """Controls servo motors to perform saccadic eye movements."""
     
-    def __init__(self, pan_zero=90.0, tilt_zero=90.0):
+    def __init__(self, pan_zero=97.0, tilt_zero=93.0):
         """
         Initialize the saccade controller.
         
@@ -378,7 +378,7 @@ and then enter an interactive mode where you can issue saccade commands
 immediately without reconnection delays.
 
 Examples:
-  # Start with default zero position (90°, 90°)
+  # Start with default zero position (97°, 93°)
   %(prog)s
   
   # Start with custom zero positions
@@ -397,10 +397,10 @@ Once in interactive mode:
     )
     
     # Global options
-    parser.add_argument('--pan-zero', type=float, default=90.0,
-                        help='Zero position for pan servo in degrees (default: 90)')
-    parser.add_argument('--tilt-zero', type=float, default=90.0,
-                        help='Zero position for tilt servo in degrees (default: 90)')
+    parser.add_argument('--pan-zero', type=float, default=97.0,
+                        help='Zero position for pan servo in degrees (default: 97)')
+    parser.add_argument('--tilt-zero', type=float, default=93.0,
+                        help='Zero position for tilt servo in degrees (default: 93)')
     parser.add_argument('--acceleration', type=float, default=DEFAULT_ACCELERATION,
                         help=f'Default acceleration in deg/s² (default: {DEFAULT_ACCELERATION})')
     parser.add_argument('--velocity', type=float, default=DEFAULT_MAX_VELOCITY,
