@@ -11,6 +11,9 @@ from Phidgets.PhidgetException import PhidgetException
 import argparse
 import sys
 import time
+import csv
+from datetime import datetime
+import threading
 
 
 # Default saccade parameters based on human eye movement characteristics
@@ -40,6 +43,8 @@ class SaccadeController:
         self.pan_zero = pan_zero
         self.tilt_zero = tilt_zero
         self.connected = False
+        self.profiling = False
+        self.profile_data = []
     
     def connect(self):
         """Connect to the Phidget servo controller."""
@@ -259,6 +264,234 @@ class SaccadeController:
                 print("Connection closed")
             except PhidgetException:
                 pass
+    
+    def _profile_thread(self, target_x, target_y, sample_rate_hz=100):
+        """
+        Background thread to sample position and velocity during movement.
+        
+        Args:
+            target_x: Target X position (relative)
+            target_y: Target Y position (relative)
+            sample_rate_hz: Sampling frequency in Hz
+        """
+        sample_interval = 1.0 / sample_rate_hz
+        start_time = time.time()
+        target_pan = self.pan_zero + target_x
+        target_tilt = self.tilt_zero + target_y
+        
+        # Tolerance for considering we've reached target (degrees)
+        position_tolerance = 0.5
+        
+        while self.profiling:
+            try:
+                current_time = time.time() - start_time
+                
+                # Read positions
+                pan_pos = self.servo.getPosition(PAN_CHANNEL)
+                tilt_pos = self.servo.getPosition(TILT_CHANNEL)
+                
+                # Try to read velocities (may not be supported on all devices)
+                try:
+                    pan_vel = self.servo.getVelocity(PAN_CHANNEL)
+                    tilt_vel = self.servo.getVelocity(TILT_CHANNEL)
+                except:
+                    pan_vel = None
+                    tilt_vel = None
+                
+                # Convert to relative positions
+                pan_rel = pan_pos - self.pan_zero
+                tilt_rel = tilt_pos - self.tilt_zero
+                
+                # Record data
+                self.profile_data.append({
+                    'time': current_time,
+                    'pan_abs': pan_pos,
+                    'tilt_abs': tilt_pos,
+                    'pan_rel': pan_rel,
+                    'tilt_rel': tilt_rel,
+                    'pan_vel': pan_vel,
+                    'tilt_vel': tilt_vel
+                })
+                
+                # Check if we've reached target
+                pan_error = abs(pan_pos - target_pan)
+                tilt_error = abs(tilt_pos - target_tilt)
+                
+                if pan_error < position_tolerance and tilt_error < position_tolerance:
+                    # Wait a bit more to capture settling
+                    time.sleep(0.1)
+                    break
+                
+                time.sleep(sample_interval)
+                
+            except PhidgetException:
+                break
+        
+        self.profiling = False
+    
+    def saccade_with_profile(self, x, y, acceleration=DEFAULT_ACCELERATION, 
+                            max_velocity=DEFAULT_MAX_VELOCITY, sample_rate_hz=100):
+        """
+        Perform a saccade while recording motion profile data.
+        
+        Args:
+            x: Target X position in degrees (relative to pan zero)
+            y: Target Y position in degrees (relative to tilt zero)
+            acceleration: Acceleration for this saccade
+            max_velocity: Max velocity for this saccade
+            sample_rate_hz: Sampling frequency for profiling
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.connected:
+            print("Error: Not connected to device", file=sys.stderr)
+            return False
+        
+        # Check position limits
+        valid, error_msg = self.check_position_valid(x, y)
+        if not valid:
+            print(f"Error: Position out of range - {error_msg}", file=sys.stderr)
+            return False
+        
+        # Clear previous profile data
+        self.profile_data = []
+        
+        try:
+            # Calculate absolute positions
+            pan_target = self.pan_zero + x
+            tilt_target = self.tilt_zero + y
+            
+            print(f"Executing profiled saccade to ({x}°, {y}°)")
+            print(f"  Absolute positions: Pan={pan_target}°, Tilt={tilt_target}°")
+            print(f"  Acceleration: {acceleration}°/s²")
+            print(f"  Max velocity: {max_velocity}°/s")
+            print(f"  Sampling at {sample_rate_hz} Hz")
+            
+            # Configure servos
+            self.configure_servo(PAN_CHANNEL, acceleration, max_velocity)
+            self.configure_servo(TILT_CHANNEL, acceleration, max_velocity)
+            
+            # Ensure servos are engaged
+            self.servo.setEngaged(PAN_CHANNEL, True)
+            self.servo.setEngaged(TILT_CHANNEL, True)
+            
+            # Start profiling thread
+            self.profiling = True
+            profile_thread = threading.Thread(
+                target=self._profile_thread,
+                args=(x, y, sample_rate_hz)
+            )
+            profile_thread.start()
+            
+            # Small delay to ensure thread is ready
+            time.sleep(0.01)
+            
+            # Execute movement
+            self.servo.setPosition(PAN_CHANNEL, pan_target)
+            self.servo.setPosition(TILT_CHANNEL, tilt_target)
+            
+            # Wait for profiling to complete
+            profile_thread.join(timeout=10.0)
+            self.profiling = False
+            
+            print(f"Saccade complete - captured {len(self.profile_data)} samples")
+            
+            # Analyze and display profile
+            self._analyze_profile(x, y, acceleration, max_velocity)
+            
+            return True
+            
+        except PhidgetException as e:
+            self.profiling = False
+            print(f"Error during saccade: {e}", file=sys.stderr)
+            return False
+    
+    def _analyze_profile(self, target_x, target_y, commanded_accel, commanded_vel):
+        """
+        Analyze the recorded profile data and display statistics.
+        
+        Args:
+            target_x: Commanded target X position
+            target_y: Commanded target Y position
+            commanded_accel: Commanded acceleration
+            commanded_vel: Commanded max velocity
+        """
+        if not self.profile_data:
+            print("No profile data to analyze")
+            return
+        
+        # Calculate statistics
+        duration = self.profile_data[-1]['time'] - self.profile_data[0]['time']
+        
+        # Find peak velocities
+        pan_velocities = [d['pan_vel'] for d in self.profile_data if d['pan_vel'] is not None]
+        tilt_velocities = [d['tilt_vel'] for d in self.profile_data if d['tilt_vel'] is not None]
+        
+        peak_pan_vel = max(abs(v) for v in pan_velocities) if pan_velocities else None
+        peak_tilt_vel = max(abs(v) for v in tilt_velocities) if tilt_velocities else None
+        
+        # Final positions
+        final_pan = self.profile_data[-1]['pan_rel']
+        final_tilt = self.profile_data[-1]['tilt_rel']
+        
+        # Position error
+        pan_error = final_pan - target_x
+        tilt_error = final_tilt - target_y
+        
+        print("\n" + "="*60)
+        print("Motion Profile Analysis")
+        print("="*60)
+        print(f"Duration: {duration*1000:.1f} ms")
+        print(f"Samples: {len(self.profile_data)}")
+        print(f"\nCommanded:")
+        print(f"  Target: ({target_x:.2f}°, {target_y:.2f}°)")
+        print(f"  Max velocity: {commanded_vel:.1f}°/s")
+        print(f"  Acceleration: {commanded_accel:.1f}°/s²")
+        print(f"\nActual:")
+        print(f"  Final position: ({final_pan:.2f}°, {final_tilt:.2f}°)")
+        print(f"  Position error: ({pan_error:.2f}°, {tilt_error:.2f}°)")
+        
+        if peak_pan_vel is not None and peak_tilt_vel is not None:
+            print(f"  Peak pan velocity: {peak_pan_vel:.1f}°/s")
+            print(f"  Peak tilt velocity: {peak_tilt_vel:.1f}°/s")
+        else:
+            print("  (Velocity data not available from device)")
+        
+        print("="*60 + "\n")
+    
+    def save_profile(self, filename=None):
+        """
+        Save the most recent profile data to a CSV file.
+        
+        Args:
+            filename: Output filename (auto-generated if None)
+            
+        Returns:
+            The filename used, or None if no data to save
+        """
+        if not self.profile_data:
+            print("No profile data to save")
+            return None
+        
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"saccade_profile_{timestamp}.csv"
+        
+        try:
+            with open(filename, 'w', newline='') as f:
+                fieldnames = ['time', 'pan_abs', 'tilt_abs', 'pan_rel', 'tilt_rel', 
+                            'pan_vel', 'tilt_vel']
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self.profile_data)
+            
+            print(f"Profile data saved to: {filename}")
+            return filename
+            
+        except IOError as e:
+            print(f"Error saving profile: {e}", file=sys.stderr)
+            return None
 
 
 def interactive_mode(controller):
@@ -273,6 +506,8 @@ def interactive_mode(controller):
     print("="*60)
     print("\nAvailable commands:")
     print("  saccade <x> <y> [accel] [velocity]  - Perform saccade")
+    print("  profile <x> <y> [accel] [velocity]  - Profiled saccade (records motion)")
+    print("  save [filename]                      - Save last profile to CSV")
     print("  position                             - Show current position")
     print("  limits                               - Show servo position limits")
     print("  zero                                 - Return to zero position")
@@ -302,6 +537,8 @@ def interactive_mode(controller):
             elif command == 'help':
                 print("\nCommands:")
                 print("  saccade <x> <y> [accel] [velocity]  - Move to position (x,y) in degrees")
+                print("  profile <x> <y> [accel] [velocity]  - Profiled saccade (records motion data)")
+                print("  save [filename]                      - Save last profile to CSV file")
                 print("  position                             - Display current position")
                 print("  limits                               - Show servo position limits")
                 print("  zero                                 - Return to zero position")
@@ -324,6 +561,26 @@ def interactive_mode(controller):
                     controller.saccade(x, y, acceleration=accel, max_velocity=velocity)
                 except ValueError:
                     print("Error: Invalid numeric values")
+            
+            elif command == 'profile':
+                if len(parts) < 3:
+                    print("Error: profile requires x and y positions")
+                    print("Usage: profile <x> <y> [accel] [velocity]")
+                    continue
+                
+                try:
+                    x = float(parts[1])
+                    y = float(parts[2])
+                    accel = float(parts[3]) if len(parts) > 3 else DEFAULT_ACCELERATION
+                    velocity = float(parts[4]) if len(parts) > 4 else DEFAULT_MAX_VELOCITY
+                    
+                    controller.saccade_with_profile(x, y, acceleration=accel, max_velocity=velocity)
+                except ValueError:
+                    print("Error: Invalid numeric values")
+            
+            elif command == 'save':
+                filename = parts[1] if len(parts) > 1 else None
+                controller.save_profile(filename)
             
             elif command == 'position':
                 x, y = controller.get_current_position()
