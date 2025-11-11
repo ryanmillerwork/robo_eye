@@ -415,6 +415,17 @@ class SaccadeController:
             print(f"Error during saccade: {e}", file=sys.stderr)
             return False
     
+    def _smooth_data(self, data, window=3):
+        """Apply simple moving average smoothing."""
+        if len(data) < window:
+            return data
+        smoothed = []
+        for i in range(len(data)):
+            start = max(0, i - window // 2)
+            end = min(len(data), i + window // 2 + 1)
+            smoothed.append(sum(data[start:end]) / (end - start))
+        return smoothed
+    
     def _analyze_profile(self, target_x, target_y, commanded_accel, commanded_vel):
         """
         Analyze the recorded profile data and display statistics.
@@ -432,81 +443,94 @@ class SaccadeController:
         # Calculate statistics
         duration = self.profile_data[-1]['time'] - self.profile_data[0]['time']
         
-        # Find peak velocities
-        pan_velocities = [d['pan_vel'] for d in self.profile_data if d['pan_vel'] is not None]
-        tilt_velocities = [d['tilt_vel'] for d in self.profile_data if d['tilt_vel'] is not None]
+        # Extract velocity data
+        times = [d['time'] for d in self.profile_data]
+        pan_velocities = [d['pan_vel'] if d['pan_vel'] is not None else None for d in self.profile_data]
+        tilt_velocities = [d['tilt_vel'] if d['tilt_vel'] is not None else None for d in self.profile_data]
         
-        peak_pan_vel = max(abs(v) for v in pan_velocities) if pan_velocities else None
-        peak_tilt_vel = max(abs(v) for v in tilt_velocities) if tilt_velocities else None
+        # Check if we have velocity data from device
+        has_device_velocity = any(v is not None for v in pan_velocities)
         
-        # Calculate peak accelerations
-        peak_pan_accel = None
-        peak_tilt_accel = None
-        
-        if pan_velocities and len(pan_velocities) > 1:
-            # Calculate acceleration from velocity data
-            pan_accels = []
-            for i in range(1, len(self.profile_data)):
-                if (self.profile_data[i]['pan_vel'] is not None and 
-                    self.profile_data[i-1]['pan_vel'] is not None):
-                    dt = self.profile_data[i]['time'] - self.profile_data[i-1]['time']
-                    if dt > 0:
-                        dv = self.profile_data[i]['pan_vel'] - self.profile_data[i-1]['pan_vel']
-                        pan_accels.append(abs(dv / dt))
-            if pan_accels:
-                peak_pan_accel = max(pan_accels)
-        
-        if tilt_velocities and len(tilt_velocities) > 1:
-            # Calculate acceleration from velocity data
-            tilt_accels = []
-            for i in range(1, len(self.profile_data)):
-                if (self.profile_data[i]['tilt_vel'] is not None and 
-                    self.profile_data[i-1]['tilt_vel'] is not None):
-                    dt = self.profile_data[i]['time'] - self.profile_data[i-1]['time']
-                    if dt > 0:
-                        dv = self.profile_data[i]['tilt_vel'] - self.profile_data[i-1]['tilt_vel']
-                        tilt_accels.append(abs(dv / dt))
-            if tilt_accels:
-                peak_tilt_accel = max(tilt_accels)
-        
-        # If velocity not available, estimate from position (numerical differentiation)
-        if peak_pan_vel is None and len(self.profile_data) > 2:
-            pan_vels = []
+        # Calculate or estimate velocities
+        if not has_device_velocity:
+            # Estimate from position
+            pan_velocities = [None]
+            tilt_velocities = [None]
             for i in range(1, len(self.profile_data)):
                 dt = self.profile_data[i]['time'] - self.profile_data[i-1]['time']
                 if dt > 0:
                     dp = self.profile_data[i]['pan_rel'] - self.profile_data[i-1]['pan_rel']
-                    pan_vels.append(abs(dp / dt))
-            if pan_vels:
-                peak_pan_vel = max(pan_vels)
-                # Also calculate acceleration from these estimated velocities
-                pan_accels = []
-                for i in range(1, len(pan_vels)):
-                    dt = self.profile_data[i+1]['time'] - self.profile_data[i]['time']
-                    if dt > 0:
-                        dv = pan_vels[i] - pan_vels[i-1]
-                        pan_accels.append(abs(dv / dt))
-                if pan_accels:
-                    peak_pan_accel = max(pan_accels)
+                    dt_pan = self.profile_data[i]['tilt_rel'] - self.profile_data[i-1]['tilt_rel']
+                    pan_velocities.append(dp / dt)
+                    tilt_velocities.append(dt_pan / dt)
+                else:
+                    pan_velocities.append(None)
+                    tilt_velocities.append(None)
         
-        if peak_tilt_vel is None and len(self.profile_data) > 2:
-            tilt_vels = []
-            for i in range(1, len(self.profile_data)):
-                dt = self.profile_data[i]['time'] - self.profile_data[i-1]['time']
-                if dt > 0:
-                    dp = self.profile_data[i]['tilt_rel'] - self.profile_data[i-1]['tilt_rel']
-                    tilt_vels.append(abs(dp / dt))
-            if tilt_vels:
-                peak_tilt_vel = max(tilt_vels)
-                # Also calculate acceleration from these estimated velocities
-                tilt_accels = []
-                for i in range(1, len(tilt_vels)):
-                    dt = self.profile_data[i+1]['time'] - self.profile_data[i]['time']
+        # Filter out None values
+        pan_vels_clean = [v for v in pan_velocities if v is not None]
+        tilt_vels_clean = [v for v in tilt_velocities if v is not None]
+        
+        peak_pan_vel = max(abs(v) for v in pan_vels_clean) if pan_vels_clean else None
+        peak_tilt_vel = max(abs(v) for v in tilt_vels_clean) if tilt_vels_clean else None
+        
+        # Calculate accelerations with smoothing
+        peak_pan_accel = None
+        peak_tilt_accel = None
+        avg_pan_accel = None
+        avg_tilt_accel = None
+        
+        if len(pan_vels_clean) > 3:
+            # Smooth velocities to reduce noise in acceleration calculation
+            smoothed_pan_vel = self._smooth_data(pan_vels_clean, window=5)
+            
+            # Calculate acceleration from smoothed velocity
+            pan_accels = []
+            for i in range(1, len(smoothed_pan_vel)):
+                # Use original time intervals
+                valid_indices = [j for j, v in enumerate(pan_velocities) if v is not None]
+                if i < len(valid_indices):
+                    dt = times[valid_indices[i]] - times[valid_indices[i-1]]
                     if dt > 0:
-                        dv = tilt_vels[i] - tilt_vels[i-1]
+                        dv = smoothed_pan_vel[i] - smoothed_pan_vel[i-1]
+                        pan_accels.append(abs(dv / dt))
+            
+            if pan_accels:
+                # Sort and take 90th percentile to avoid noise spikes
+                pan_accels_sorted = sorted(pan_accels)
+                idx_90 = int(len(pan_accels_sorted) * 0.9)
+                peak_pan_accel = pan_accels_sorted[idx_90] if idx_90 < len(pan_accels_sorted) else pan_accels_sorted[-1]
+                # Average acceleration during main movement (middle 80%)
+                start_idx = int(len(pan_accels) * 0.1)
+                end_idx = int(len(pan_accels) * 0.9)
+                if end_idx > start_idx:
+                    avg_pan_accel = sum(pan_accels[start_idx:end_idx]) / (end_idx - start_idx)
+        
+        if len(tilt_vels_clean) > 3:
+            # Smooth velocities to reduce noise in acceleration calculation
+            smoothed_tilt_vel = self._smooth_data(tilt_vels_clean, window=5)
+            
+            # Calculate acceleration from smoothed velocity
+            tilt_accels = []
+            for i in range(1, len(smoothed_tilt_vel)):
+                # Use original time intervals
+                valid_indices = [j for j, v in enumerate(tilt_velocities) if v is not None]
+                if i < len(valid_indices):
+                    dt = times[valid_indices[i]] - times[valid_indices[i-1]]
+                    if dt > 0:
+                        dv = smoothed_tilt_vel[i] - smoothed_tilt_vel[i-1]
                         tilt_accels.append(abs(dv / dt))
-                if tilt_accels:
-                    peak_tilt_accel = max(tilt_accels)
+            
+            if tilt_accels:
+                # Sort and take 90th percentile to avoid noise spikes
+                tilt_accels_sorted = sorted(tilt_accels)
+                idx_90 = int(len(tilt_accels_sorted) * 0.9)
+                peak_tilt_accel = tilt_accels_sorted[idx_90] if idx_90 < len(tilt_accels_sorted) else tilt_accels_sorted[-1]
+                # Average acceleration during main movement (middle 80%)
+                start_idx = int(len(tilt_accels) * 0.1)
+                end_idx = int(len(tilt_accels) * 0.9)
+                if end_idx > start_idx:
+                    avg_tilt_accel = sum(tilt_accels[start_idx:end_idx]) / (end_idx - start_idx)
         
         # Final positions
         final_pan = self.profile_data[-1]['pan_rel']
@@ -535,12 +559,17 @@ class SaccadeController:
             print(f"  Peak tilt velocity: {peak_tilt_vel:.1f}°/s")
         
         if peak_pan_accel is not None:
-            print(f"  Peak pan acceleration: {peak_pan_accel:.1f}°/s²")
+            print(f"  Peak pan accel (90th %ile): {peak_pan_accel:.1f}°/s²")
+        if avg_pan_accel is not None:
+            print(f"  Avg pan accel: {avg_pan_accel:.1f}°/s²")
         if peak_tilt_accel is not None:
-            print(f"  Peak tilt acceleration: {peak_tilt_accel:.1f}°/s²")
+            print(f"  Peak tilt accel (90th %ile): {peak_tilt_accel:.1f}°/s²")
+        if avg_tilt_accel is not None:
+            print(f"  Avg tilt accel: {avg_tilt_accel:.1f}°/s²")
         
-        if peak_pan_vel is None and peak_tilt_vel is None:
-            print("  (Velocity data estimated from position)")
+        if not has_device_velocity:
+            print("\n  Note: Velocity/acceleration estimated from position")
+            print("        (smoothed with 5-point moving average)")
         
         print("="*60 + "\n")
     
