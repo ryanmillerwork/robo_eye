@@ -125,8 +125,8 @@ class SaccadeController:
         Perform a saccade to the specified position.
         
         Args:
-            x: Target X position in degrees (relative to pan zero)
-            y: Target Y position in degrees (relative to tilt zero)
+            x: Target X position in degrees (relative to pan zero, positive = right)
+            y: Target Y position in degrees (relative to tilt zero, positive = up)
             acceleration: Acceleration for this saccade
             max_velocity: Max velocity for this saccade
             check_limits: Whether to check position limits before moving
@@ -143,9 +143,11 @@ class SaccadeController:
                 return False
         
         try:
-            # Calculate absolute positions
-            pan_target = self.pan_zero + x
-            tilt_target = self.tilt_zero + y
+            # Calculate absolute positions (negate for correct axis directions)
+            # Positive x = right = decreasing pan angle
+            # Positive y = up = decreasing tilt angle
+            pan_target = self.pan_zero - x
+            tilt_target = self.tilt_zero - y
             
             print(f"Executing saccade to ({x}°, {y}°)")
             print(f"  Absolute positions: Pan={pan_target}°, Tilt={tilt_target}°")
@@ -172,14 +174,14 @@ class SaccadeController:
             return False
     
     def get_current_position(self):
-        """Get current servo positions relative to zero."""
+        """Get current servo positions relative to zero (positive x=right, positive y=up)."""
         try:
             pan_abs = self.servo.getPosition(PAN_CHANNEL)
             tilt_abs = self.servo.getPosition(TILT_CHANNEL)
             
-            # Convert to relative positions
-            pan_rel = pan_abs - self.pan_zero
-            tilt_rel = tilt_abs - self.tilt_zero
+            # Convert to relative positions (negate for correct axis directions)
+            pan_rel = self.pan_zero - pan_abs
+            tilt_rel = self.tilt_zero - tilt_abs
             
             return pan_rel, tilt_rel
         except PhidgetException as e:
@@ -210,8 +212,8 @@ class SaccadeController:
         Check if a relative position (x, y) is within servo limits.
         
         Args:
-            x: Relative X position in degrees
-            y: Relative Y position in degrees
+            x: Relative X position in degrees (positive = right)
+            y: Relative Y position in degrees (positive = up)
             
         Returns:
             Tuple of (valid, error_message)
@@ -222,9 +224,9 @@ class SaccadeController:
         
         pan_min, pan_max, tilt_min, tilt_max = limits
         
-        # Calculate absolute target positions
-        pan_target = self.pan_zero + x
-        tilt_target = self.tilt_zero + y
+        # Calculate absolute target positions (negate for correct axis directions)
+        pan_target = self.pan_zero - x
+        tilt_target = self.tilt_zero - y
         
         errors = []
         
@@ -270,14 +272,14 @@ class SaccadeController:
         Background thread to sample position and velocity during movement.
         
         Args:
-            target_x: Target X position (relative)
-            target_y: Target Y position (relative)
+            target_x: Target X position (relative, positive = right)
+            target_y: Target Y position (relative, positive = up)
             sample_rate_hz: Sampling frequency in Hz
         """
         sample_interval = 1.0 / sample_rate_hz
         start_time = time.time()
-        target_pan = self.pan_zero + target_x
-        target_tilt = self.tilt_zero + target_y
+        target_pan = self.pan_zero - target_x
+        target_tilt = self.tilt_zero - target_y
         
         # Tolerance for considering we've reached target (degrees)
         position_tolerance = 0.5
@@ -298,9 +300,15 @@ class SaccadeController:
                     pan_vel = None
                     tilt_vel = None
                 
-                # Convert to relative positions
-                pan_rel = pan_pos - self.pan_zero
-                tilt_rel = tilt_pos - self.tilt_zero
+                # Negate velocities to match axis directions (positive x=right, y=up)
+                if pan_vel is not None:
+                    pan_vel = -pan_vel
+                if tilt_vel is not None:
+                    tilt_vel = -tilt_vel
+                
+                # Convert to relative positions (negate for correct axis directions)
+                pan_rel = self.pan_zero - pan_pos
+                tilt_rel = self.tilt_zero - tilt_pos
                 
                 # Record data
                 self.profile_data.append({
@@ -335,8 +343,8 @@ class SaccadeController:
         Perform a saccade while recording motion profile data.
         
         Args:
-            x: Target X position in degrees (relative to pan zero)
-            y: Target Y position in degrees (relative to tilt zero)
+            x: Target X position in degrees (relative to pan zero, positive = right)
+            y: Target Y position in degrees (relative to tilt zero, positive = up)
             acceleration: Acceleration for this saccade
             max_velocity: Max velocity for this saccade
             sample_rate_hz: Sampling frequency for profiling
@@ -358,9 +366,9 @@ class SaccadeController:
         self.profile_data = []
         
         try:
-            # Calculate absolute positions
-            pan_target = self.pan_zero + x
-            tilt_target = self.tilt_zero + y
+            # Calculate absolute positions (negate for correct axis directions)
+            pan_target = self.pan_zero - x
+            tilt_target = self.tilt_zero - y
             
             print(f"Executing profiled saccade to ({x}°, {y}°)")
             print(f"  Absolute positions: Pan={pan_target}°, Tilt={tilt_target}°")
@@ -431,6 +439,75 @@ class SaccadeController:
         peak_pan_vel = max(abs(v) for v in pan_velocities) if pan_velocities else None
         peak_tilt_vel = max(abs(v) for v in tilt_velocities) if tilt_velocities else None
         
+        # Calculate peak accelerations
+        peak_pan_accel = None
+        peak_tilt_accel = None
+        
+        if pan_velocities and len(pan_velocities) > 1:
+            # Calculate acceleration from velocity data
+            pan_accels = []
+            for i in range(1, len(self.profile_data)):
+                if (self.profile_data[i]['pan_vel'] is not None and 
+                    self.profile_data[i-1]['pan_vel'] is not None):
+                    dt = self.profile_data[i]['time'] - self.profile_data[i-1]['time']
+                    if dt > 0:
+                        dv = self.profile_data[i]['pan_vel'] - self.profile_data[i-1]['pan_vel']
+                        pan_accels.append(abs(dv / dt))
+            if pan_accels:
+                peak_pan_accel = max(pan_accels)
+        
+        if tilt_velocities and len(tilt_velocities) > 1:
+            # Calculate acceleration from velocity data
+            tilt_accels = []
+            for i in range(1, len(self.profile_data)):
+                if (self.profile_data[i]['tilt_vel'] is not None and 
+                    self.profile_data[i-1]['tilt_vel'] is not None):
+                    dt = self.profile_data[i]['time'] - self.profile_data[i-1]['time']
+                    if dt > 0:
+                        dv = self.profile_data[i]['tilt_vel'] - self.profile_data[i-1]['tilt_vel']
+                        tilt_accels.append(abs(dv / dt))
+            if tilt_accels:
+                peak_tilt_accel = max(tilt_accels)
+        
+        # If velocity not available, estimate from position (numerical differentiation)
+        if peak_pan_vel is None and len(self.profile_data) > 2:
+            pan_vels = []
+            for i in range(1, len(self.profile_data)):
+                dt = self.profile_data[i]['time'] - self.profile_data[i-1]['time']
+                if dt > 0:
+                    dp = self.profile_data[i]['pan_rel'] - self.profile_data[i-1]['pan_rel']
+                    pan_vels.append(abs(dp / dt))
+            if pan_vels:
+                peak_pan_vel = max(pan_vels)
+                # Also calculate acceleration from these estimated velocities
+                pan_accels = []
+                for i in range(1, len(pan_vels)):
+                    dt = self.profile_data[i+1]['time'] - self.profile_data[i]['time']
+                    if dt > 0:
+                        dv = pan_vels[i] - pan_vels[i-1]
+                        pan_accels.append(abs(dv / dt))
+                if pan_accels:
+                    peak_pan_accel = max(pan_accels)
+        
+        if peak_tilt_vel is None and len(self.profile_data) > 2:
+            tilt_vels = []
+            for i in range(1, len(self.profile_data)):
+                dt = self.profile_data[i]['time'] - self.profile_data[i-1]['time']
+                if dt > 0:
+                    dp = self.profile_data[i]['tilt_rel'] - self.profile_data[i-1]['tilt_rel']
+                    tilt_vels.append(abs(dp / dt))
+            if tilt_vels:
+                peak_tilt_vel = max(tilt_vels)
+                # Also calculate acceleration from these estimated velocities
+                tilt_accels = []
+                for i in range(1, len(tilt_vels)):
+                    dt = self.profile_data[i+1]['time'] - self.profile_data[i]['time']
+                    if dt > 0:
+                        dv = tilt_vels[i] - tilt_vels[i-1]
+                        tilt_accels.append(abs(dv / dt))
+                if tilt_accels:
+                    peak_tilt_accel = max(tilt_accels)
+        
         # Final positions
         final_pan = self.profile_data[-1]['pan_rel']
         final_tilt = self.profile_data[-1]['tilt_rel']
@@ -452,11 +529,18 @@ class SaccadeController:
         print(f"  Final position: ({final_pan:.2f}°, {final_tilt:.2f}°)")
         print(f"  Position error: ({pan_error:.2f}°, {tilt_error:.2f}°)")
         
-        if peak_pan_vel is not None and peak_tilt_vel is not None:
+        if peak_pan_vel is not None:
             print(f"  Peak pan velocity: {peak_pan_vel:.1f}°/s")
+        if peak_tilt_vel is not None:
             print(f"  Peak tilt velocity: {peak_tilt_vel:.1f}°/s")
-        else:
-            print("  (Velocity data not available from device)")
+        
+        if peak_pan_accel is not None:
+            print(f"  Peak pan acceleration: {peak_pan_accel:.1f}°/s²")
+        if peak_tilt_accel is not None:
+            print(f"  Peak tilt acceleration: {peak_tilt_accel:.1f}°/s²")
+        
+        if peak_pan_vel is None and peak_tilt_vel is None:
+            print("  (Velocity data estimated from position)")
         
         print("="*60 + "\n")
     
@@ -595,8 +679,9 @@ def interactive_mode(controller):
                     print(f"  Pan (X):  {pan_min:.1f}° to {pan_max:.1f}° (range: {pan_max-pan_min:.1f}°)")
                     print(f"  Tilt (Y): {tilt_min:.1f}° to {tilt_max:.1f}° (range: {tilt_max-tilt_min:.1f}°)")
                     print(f"\nRelative to Zero Position (Pan={controller.pan_zero}°, Tilt={controller.tilt_zero}°):")
-                    print(f"  Pan (X):  {pan_min-controller.pan_zero:.1f}° to {pan_max-controller.pan_zero:.1f}°")
-                    print(f"  Tilt (Y): {tilt_min-controller.tilt_zero:.1f}° to {tilt_max-controller.tilt_zero:.1f}°")
+                    # Negate for correct axis directions (positive x=right, positive y=up)
+                    print(f"  Pan (X):  {controller.pan_zero-pan_max:.1f}° to {controller.pan_zero-pan_min:.1f}° (left to right)")
+                    print(f"  Tilt (Y): {controller.tilt_zero-tilt_max:.1f}° to {controller.tilt_zero-tilt_min:.1f}° (down to up)")
             
             elif command == 'zero':
                 print("Returning to zero position...")
