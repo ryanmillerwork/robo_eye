@@ -6,7 +6,7 @@ srv = AdvancedServo()
 try:
     srv.openPhidget()
     srv.waitForAttach(5000)
-    print("Attached:", srv.getDeviceName(), "SN:", srv.getSerialNumber())
+    print("Attached:", srv.getDeviceName(), "SN:", srv.getSerialNum())
 
     ch = 0
     srv.setSpeedRampingOn(ch, True)
