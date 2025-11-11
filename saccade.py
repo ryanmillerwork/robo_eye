@@ -194,30 +194,125 @@ class SaccadeController:
                 pass
 
 
+def interactive_mode(controller):
+    """
+    Run interactive command loop for issuing saccade commands.
+    
+    Args:
+        controller: SaccadeController instance
+    """
+    print("\n" + "="*60)
+    print("Saccade Control System - Interactive Mode")
+    print("="*60)
+    print("\nAvailable commands:")
+    print("  saccade <x> <y> [accel] [velocity]  - Perform saccade")
+    print("  position                             - Show current position")
+    print("  zero                                 - Return to zero position")
+    print("  disengage                            - Power off servos")
+    print("  engage                               - Power on servos")
+    print("  help                                 - Show this help message")
+    print("  quit / exit                          - Exit program")
+    print(f"\nDefaults: accel={DEFAULT_ACCELERATION}°/s², velocity={DEFAULT_MAX_VELOCITY}°/s")
+    print("="*60 + "\n")
+    
+    while True:
+        try:
+            # Get user input
+            user_input = input("saccade> ").strip()
+            
+            if not user_input:
+                continue
+            
+            # Parse command
+            parts = user_input.split()
+            command = parts[0].lower()
+            
+            if command in ['quit', 'exit', 'q']:
+                print("Exiting...")
+                break
+            
+            elif command == 'help':
+                print("\nCommands:")
+                print("  saccade <x> <y> [accel] [velocity]  - Move to position (x,y) in degrees")
+                print("  position                             - Display current position")
+                print("  zero                                 - Return to zero position")
+                print("  disengage                            - Power off servos")
+                print("  engage                               - Power on servos")
+                print("  quit / exit                          - Exit program\n")
+            
+            elif command == 'saccade':
+                if len(parts) < 3:
+                    print("Error: saccade requires x and y positions")
+                    print("Usage: saccade <x> <y> [accel] [velocity]")
+                    continue
+                
+                try:
+                    x = float(parts[1])
+                    y = float(parts[2])
+                    accel = float(parts[3]) if len(parts) > 3 else DEFAULT_ACCELERATION
+                    velocity = float(parts[4]) if len(parts) > 4 else DEFAULT_MAX_VELOCITY
+                    
+                    controller.saccade(x, y, acceleration=accel, max_velocity=velocity)
+                except ValueError:
+                    print("Error: Invalid numeric values")
+            
+            elif command == 'position':
+                x, y = controller.get_current_position()
+                if x is not None and y is not None:
+                    print(f"Current position: X={x:.2f}°, Y={y:.2f}°")
+            
+            elif command == 'zero':
+                print("Returning to zero position...")
+                controller.saccade(0, 0)
+            
+            elif command == 'disengage':
+                controller.disengage()
+            
+            elif command == 'engage':
+                try:
+                    controller.servo.setEngaged(PAN_CHANNEL, True)
+                    controller.servo.setEngaged(TILT_CHANNEL, True)
+                    print("Servos engaged")
+                except PhidgetException as e:
+                    print(f"Error engaging servos: {e}", file=sys.stderr)
+            
+            else:
+                print(f"Unknown command: {command}")
+                print("Type 'help' for available commands")
+        
+        except KeyboardInterrupt:
+            print("\n\nInterrupted. Type 'quit' to exit.")
+        except EOFError:
+            print("\nExiting...")
+            break
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description='Saccade Control System for Servo-based Eye Movement',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+The program will connect to the Phidget device, initialize the servos,
+and then enter an interactive mode where you can issue saccade commands
+immediately without reconnection delays.
+
 Examples:
-  # Initialize servos to default zero position (90°, 90°)
-  %(prog)s init
+  # Start with default zero position (90°, 90°)
+  %(prog)s
   
-  # Initialize with custom zero positions
-  %(prog)s init --pan-zero 100 --tilt-zero 85
+  # Start with custom zero positions
+  %(prog)s --pan-zero 100 --tilt-zero 85
   
-  # Perform saccade to (10°, -5°) with default parameters
-  %(prog)s saccade 10 -5
-  
-  # Saccade with custom velocity and acceleration
-  %(prog)s saccade 15 20 --velocity 500 --acceleration 3000
-  
-  # Get current position
-  %(prog)s position
-  
-  # Disengage servos (power off)
-  %(prog)s disengage
+  # Specify custom default acceleration and velocity
+  %(prog)s --acceleration 3000 --velocity 500
+
+Once in interactive mode:
+  saccade 10 -5           # Saccade to (10°, -5°)
+  saccade 15 20 3000 500  # Saccade with custom accel/velocity
+  position                # Show current position
+  zero                    # Return to zero
+  quit                    # Exit
         """
     )
     
@@ -226,76 +321,34 @@ Examples:
                         help='Zero position for pan servo in degrees (default: 90)')
     parser.add_argument('--tilt-zero', type=float, default=90.0,
                         help='Zero position for tilt servo in degrees (default: 90)')
-    
-    # Subcommands
-    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
-    
-    # Initialize command
-    init_parser = subparsers.add_parser('init', help='Initialize servos to zero position')
-    init_parser.add_argument('--acceleration', type=float, default=DEFAULT_ACCELERATION,
-                            help=f'Acceleration in deg/s² (default: {DEFAULT_ACCELERATION})')
-    init_parser.add_argument('--velocity', type=float, default=DEFAULT_MAX_VELOCITY,
-                            help=f'Max velocity in deg/s (default: {DEFAULT_MAX_VELOCITY})')
-    
-    # Saccade command
-    saccade_parser = subparsers.add_parser('saccade', help='Perform saccade to target position')
-    saccade_parser.add_argument('x', type=float,
-                               help='Target X position in degrees (relative to zero)')
-    saccade_parser.add_argument('y', type=float,
-                               help='Target Y position in degrees (relative to zero)')
-    saccade_parser.add_argument('--acceleration', type=float, default=DEFAULT_ACCELERATION,
-                               help=f'Acceleration in deg/s² (default: {DEFAULT_ACCELERATION})')
-    saccade_parser.add_argument('--velocity', type=float, default=DEFAULT_MAX_VELOCITY,
-                               help=f'Max velocity in deg/s (default: {DEFAULT_MAX_VELOCITY})')
-    
-    # Position command
-    position_parser = subparsers.add_parser('position', help='Get current position')
-    
-    # Disengage command
-    disengage_parser = subparsers.add_parser('disengage', help='Disengage (power off) servos')
+    parser.add_argument('--acceleration', type=float, default=DEFAULT_ACCELERATION,
+                        help=f'Default acceleration in deg/s² (default: {DEFAULT_ACCELERATION})')
+    parser.add_argument('--velocity', type=float, default=DEFAULT_MAX_VELOCITY,
+                        help=f'Default max velocity in deg/s (default: {DEFAULT_MAX_VELOCITY})')
     
     # Parse arguments
     args = parser.parse_args()
-    
-    if not args.command:
-        parser.print_help()
-        return 1
     
     # Create controller
     controller = SaccadeController(pan_zero=args.pan_zero, tilt_zero=args.tilt_zero)
     
     try:
         # Connect to device
+        print("Connecting to Phidget device...")
         if not controller.connect():
             return 1
         
-        # Execute command
-        if args.command == 'init':
-            success = controller.initialize(
-                acceleration=args.acceleration,
-                max_velocity=args.velocity
-            )
-            return 0 if success else 1
-            
-        elif args.command == 'saccade':
-            success = controller.saccade(
-                x=args.x,
-                y=args.y,
-                acceleration=args.acceleration,
-                max_velocity=args.velocity
-            )
-            return 0 if success else 1
-            
-        elif args.command == 'position':
-            x, y = controller.get_current_position()
-            if x is not None and y is not None:
-                print(f"Current position: X={x:.2f}°, Y={y:.2f}°")
-                return 0
+        # Initialize servos
+        print("\nInitializing servos...")
+        if not controller.initialize(acceleration=args.acceleration, max_velocity=args.velocity):
             return 1
-            
-        elif args.command == 'disengage':
-            controller.disengage()
-            return 0
+        
+        print("System ready!")
+        
+        # Enter interactive mode
+        interactive_mode(controller)
+        
+        return 0
     
     finally:
         # Always clean up
