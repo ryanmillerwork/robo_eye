@@ -115,7 +115,7 @@ class SaccadeController:
             print(f"Error during initialization: {e}", file=sys.stderr)
             return False
     
-    def saccade(self, x, y, acceleration=DEFAULT_ACCELERATION, max_velocity=DEFAULT_MAX_VELOCITY):
+    def saccade(self, x, y, acceleration=DEFAULT_ACCELERATION, max_velocity=DEFAULT_MAX_VELOCITY, check_limits=True):
         """
         Perform a saccade to the specified position.
         
@@ -124,10 +124,18 @@ class SaccadeController:
             y: Target Y position in degrees (relative to tilt zero)
             acceleration: Acceleration for this saccade
             max_velocity: Max velocity for this saccade
+            check_limits: Whether to check position limits before moving
         """
         if not self.connected:
             print("Error: Not connected to device", file=sys.stderr)
             return False
+        
+        # Check if position is within limits
+        if check_limits:
+            valid, error_msg = self.check_position_valid(x, y)
+            if not valid:
+                print(f"Error: Position out of range - {error_msg}", file=sys.stderr)
+                return False
         
         try:
             # Calculate absolute positions
@@ -173,6 +181,65 @@ class SaccadeController:
             print(f"Error reading position: {e}", file=sys.stderr)
             return None, None
     
+    def get_position_limits(self):
+        """
+        Get the position limits for both servos.
+        
+        Returns:
+            Tuple of (pan_min, pan_max, tilt_min, tilt_max) in absolute degrees,
+            or None if error occurs
+        """
+        try:
+            pan_min = self.servo.getPositionMin(PAN_CHANNEL)
+            pan_max = self.servo.getPositionMax(PAN_CHANNEL)
+            tilt_min = self.servo.getPositionMin(TILT_CHANNEL)
+            tilt_max = self.servo.getPositionMax(TILT_CHANNEL)
+            
+            return pan_min, pan_max, tilt_min, tilt_max
+        except PhidgetException as e:
+            print(f"Error reading position limits: {e}", file=sys.stderr)
+            return None
+    
+    def check_position_valid(self, x, y):
+        """
+        Check if a relative position (x, y) is within servo limits.
+        
+        Args:
+            x: Relative X position in degrees
+            y: Relative Y position in degrees
+            
+        Returns:
+            Tuple of (valid, error_message)
+        """
+        limits = self.get_position_limits()
+        if limits is None:
+            return False, "Unable to read position limits"
+        
+        pan_min, pan_max, tilt_min, tilt_max = limits
+        
+        # Calculate absolute target positions
+        pan_target = self.pan_zero + x
+        tilt_target = self.tilt_zero + y
+        
+        errors = []
+        
+        # Check pan limits
+        if pan_target < pan_min:
+            errors.append(f"Pan position {pan_target:.1f}° below minimum {pan_min:.1f}°")
+        elif pan_target > pan_max:
+            errors.append(f"Pan position {pan_target:.1f}° above maximum {pan_max:.1f}°")
+        
+        # Check tilt limits
+        if tilt_target < tilt_min:
+            errors.append(f"Tilt position {tilt_target:.1f}° below minimum {tilt_min:.1f}°")
+        elif tilt_target > tilt_max:
+            errors.append(f"Tilt position {tilt_target:.1f}° above maximum {tilt_max:.1f}°")
+        
+        if errors:
+            return False, "; ".join(errors)
+        
+        return True, None
+    
     def disengage(self):
         """Disengage (power off) the servos."""
         if self.connected:
@@ -207,6 +274,7 @@ def interactive_mode(controller):
     print("\nAvailable commands:")
     print("  saccade <x> <y> [accel] [velocity]  - Perform saccade")
     print("  position                             - Show current position")
+    print("  limits                               - Show servo position limits")
     print("  zero                                 - Return to zero position")
     print("  disengage                            - Power off servos")
     print("  engage                               - Power on servos")
@@ -235,6 +303,7 @@ def interactive_mode(controller):
                 print("\nCommands:")
                 print("  saccade <x> <y> [accel] [velocity]  - Move to position (x,y) in degrees")
                 print("  position                             - Display current position")
+                print("  limits                               - Show servo position limits")
                 print("  zero                                 - Return to zero position")
                 print("  disengage                            - Power off servos")
                 print("  engage                               - Power on servos")
@@ -260,6 +329,17 @@ def interactive_mode(controller):
                 x, y = controller.get_current_position()
                 if x is not None and y is not None:
                     print(f"Current position: X={x:.2f}°, Y={y:.2f}°")
+            
+            elif command == 'limits':
+                limits = controller.get_position_limits()
+                if limits:
+                    pan_min, pan_max, tilt_min, tilt_max = limits
+                    print(f"\nServo Position Limits (Absolute):")
+                    print(f"  Pan (X):  {pan_min:.1f}° to {pan_max:.1f}° (range: {pan_max-pan_min:.1f}°)")
+                    print(f"  Tilt (Y): {tilt_min:.1f}° to {tilt_max:.1f}° (range: {tilt_max-tilt_min:.1f}°)")
+                    print(f"\nRelative to Zero Position (Pan={controller.pan_zero}°, Tilt={controller.tilt_zero}°):")
+                    print(f"  Pan (X):  {pan_min-controller.pan_zero:.1f}° to {pan_max-controller.pan_zero:.1f}°")
+                    print(f"  Tilt (Y): {tilt_min-controller.tilt_zero:.1f}° to {tilt_max-controller.tilt_zero:.1f}°")
             
             elif command == 'zero':
                 print("Returning to zero position...")
