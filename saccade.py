@@ -15,6 +15,13 @@ import csv
 from datetime import datetime
 import threading
 
+# Import readline for command history and tab completion
+try:
+    import readline
+    HAS_READLINE = True
+except ImportError:
+    HAS_READLINE = False
+
 
 # Default saccade parameters based on human eye movement characteristics
 # Human saccades can reach peak velocities of 400-700 deg/s
@@ -607,6 +614,49 @@ class SaccadeController:
             return None
 
 
+class CommandCompleter:
+    """Tab completion for interactive commands."""
+    
+    def __init__(self):
+        self.commands = [
+            'saccade', 'profile', 'save', 'position', 
+            'limits', 'zero', 'disengage', 'engage', 'help', 'quit', 'exit'
+        ]
+    
+    def complete(self, text, state):
+        """Return the next possible completion for 'text'."""
+        # Get the entire line buffer
+        line = readline.get_line_buffer()
+        
+        # If we're completing the first word (command)
+        if not line or line.lstrip() == text:
+            options = [cmd for cmd in self.commands if cmd.startswith(text)]
+        else:
+            # For subsequent words, could add context-specific completion here
+            options = []
+        
+        if state < len(options):
+            return options[state]
+        return None
+
+
+def setup_readline():
+    """Configure readline for command history and tab completion."""
+    if not HAS_READLINE:
+        return
+    
+    # Set up tab completion
+    completer = CommandCompleter()
+    readline.set_completer(completer.complete)
+    readline.parse_and_bind('tab: complete')
+    
+    # Set up history
+    readline.set_history_length(1000)
+    
+    # Enable better word breaking for tab completion
+    readline.set_completer_delims(' \t\n')
+
+
 def interactive_mode(controller):
     """
     Run interactive command loop for issuing saccade commands.
@@ -614,6 +664,9 @@ def interactive_mode(controller):
     Args:
         controller: SaccadeController instance
     """
+    # Set up readline for history and tab completion
+    setup_readline()
+    
     print("\n" + "="*60)
     print("Saccade Control System - Interactive Mode")
     print("="*60)
@@ -629,6 +682,8 @@ def interactive_mode(controller):
     print("  help                                 - Show this help message")
     print("  quit / exit                          - Exit program")
     print(f"\nDefaults: accel={DEFAULT_ACCELERATION}°/s², velocity={DEFAULT_MAX_VELOCITY}°/s")
+    if HAS_READLINE:
+        print("\nTip: Use ↑/↓ arrows for history, Tab for command completion")
     print("="*60 + "\n")
     
     while True:
@@ -657,7 +712,12 @@ def interactive_mode(controller):
                 print("  zero                                 - Return to zero position")
                 print("  disengage                            - Power off servos")
                 print("  engage                               - Power on servos")
-                print("  quit / exit                          - Exit program\n")
+                print("  quit / exit                          - Exit program")
+                if HAS_READLINE:
+                    print("\nTips:")
+                    print("  - Use ↑/↓ arrow keys to navigate command history")
+                    print("  - Press Tab to autocomplete commands")
+                print()
             
             elif command == 'saccade':
                 if len(parts) < 3:
