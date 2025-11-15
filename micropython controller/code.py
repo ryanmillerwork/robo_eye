@@ -12,13 +12,66 @@ servo_status = SERVO_DEFAULT_STATUS
 servo_controller = None
 SERVO_FREQUENCY = 50
 SERVO_RANGE_DEGREES = 45
+SERVO_US_PER_DEGREE = 11
 
 SERVO_CONFIG = [
-    {"name": "Left pan", "channel": 4, "zero_pulse_us": 2100}, # increase is left
-    {"name": "Left tilt", "channel": 5, "zero_pulse_us": 1700}, # increase is up
-    {"name": "Right pan", "channel": 6, "zero_pulse_us": 1350}, # increase is left
-    {"name": "Right tilt", "channel": 7, "zero_pulse_us": 1300}, # increase is down
+    {
+        "name": "Left pan",
+        "eye": "L",
+        "axis": "pan",
+        "channel": 4,
+        "zero_pulse_us": 1490,
+        "direction": 1,  # increase is left
+    },
+    {
+        "name": "Left tilt",
+        "eye": "L",
+        "axis": "tilt",
+        "channel": 5,
+        "zero_pulse_us": 1460,
+        "direction": 1,  # increase is up
+    },
+    {
+        "name": "Right pan",
+        "eye": "R",
+        "axis": "pan",
+        "channel": 6,
+        "zero_pulse_us": 1560,
+        "direction": 1,  # increase is left
+    },
+    {
+        "name": "Right tilt",
+        "eye": "R",
+        "axis": "tilt",
+        "channel": 7,
+        "zero_pulse_us": 1460,
+        "direction": -1,  # increase is down
+    },
 ]
+
+EYE_KEYS = ("L", "R")
+EYE_OPTIONS = ("L", "R", "B")
+EYE_AXES = ("pan", "tilt")
+eye_angles = {eye: {"pan": 0.0, "tilt": 0.0} for eye in EYE_KEYS}
+eye_selection_index = EYE_OPTIONS.index("B")
+
+SERVO_LOOKUP = {}
+for servo in SERVO_CONFIG:
+    SERVO_LOOKUP[(servo["eye"], servo["axis"])] = servo
+
+NINE_POINT_VECTORS = {
+    "UL": (1, 1),
+    "UC": (0, 1),
+    "UR": (-1, 1),
+    "L": (1, 0),
+    "C": (0, 0),
+    "R": (-1, 0),
+    "LL": (1, -1),
+    "LC": (0, -1),
+    "LR": (-1, -1),
+}
+POINT_DISTANCE_OPTIONS = (1, 5, 10, 20, 40)
+point_distance_index = POINT_DISTANCE_OPTIONS.index(10)
 
 # --- Input setup ------------------------------------------------------------
 # D0 (BOOT) is pulled high and reads low when pressed.
@@ -32,7 +85,7 @@ boot_button = keypad.Keys(
 user_buttons = keypad.Keys(
     (board.D1, board.D2),
     value_when_pressed=True,
-    pull=False,
+    pull=True,
 )
 
 BUTTON_GROUPS = (
@@ -46,13 +99,6 @@ d2_press_time = None
 # --- Menu definition --------------------------------------------------------
 MENU = [
     {
-        "name": "Eye",
-        "options": ["L", "R", "B"],
-        "row_length": 3,
-        "cell_width": 5,
-        "default_option": "B",
-    },
-    {
         "name": "9-pt",
         "options": ["UL", "UC", "UR", "L", "C", "R", "LL", "LC", "LR"],
         "row_length": 3,
@@ -64,11 +110,14 @@ MENU = [
         "message": "Reset eye(s)\nto center",
     },
     {
-        "name": "Serv",
-        "options": [],
-        "message": lambda: servo_status,
+        "name": "Settings",
+        "options": ["Eye", "Range"],
+        "row_length": 1,
+        "default_option": 0,
     },
 ]
+
+MENU_9PT_INDEX = 0
 
 current_menu_index = 0
 def default_option_index(section):
@@ -108,6 +157,8 @@ OPTION_COLOR = 0x00FFFF
 OPTION_HIGHLIGHT_COLOR = 0xFF8800
 OPTION_SELECTED_COLOR = 0xFFFFFF
 STATUS_COLOR = 0xAAAAAA
+STATUS_CONNECTED_COLOR = 0x00FF00
+STATUS_DISCONNECTED_COLOR = 0xFF0000
 MENU_LABEL_SCALE = 2
 OPTION_LABEL_SCALE = 2
 OPTION_ROW_SPACING = 24
@@ -143,6 +194,18 @@ status_label = label.Label(
 root_group.append(status_label)
 
 
+def format_eye_state(eye_key):
+    state = eye_angles[eye_key]
+    return f"{state['pan']:+.0f}°, {state['tilt']:+.0f}°"
+
+
+def update_eye_status():
+    status_label.text = f"L: {format_eye_state('L')}  R: {format_eye_state('R')}"
+
+
+update_eye_status()
+
+
 def connect_servo_controller(address=0x40, frequency=SERVO_FREQUENCY, i2c=None):
     """Return an initialized PCA9685 driver for the Servo FeatherWing."""
     if i2c is None:
@@ -176,6 +239,10 @@ def ensure_servo_controller():
         return servo_controller
 
 
+def get_servo_status_color():
+    return STATUS_CONNECTED_COLOR if servo_controller else STATUS_DISCONNECTED_COLOR
+
+
 def pulse_us_to_duty_cycle(pulse_us, frequency=SERVO_FREQUENCY):
     period_seconds = 1.0 / frequency
     pulse_seconds = pulse_us / 1_000_000
@@ -192,24 +259,64 @@ def set_servo_pulse(channel, pulse_us):
     return True
 
 
-def zero_servos():
-    controller = ensure_servo_controller()
-    if controller is None:
-        print("Unable to zero servos without a controller.")
+def clamp_degrees(value):
+    return max(-SERVO_RANGE_DEGREES, min(SERVO_RANGE_DEGREES, value))
+
+
+def set_axis_angle(eye, axis, degrees):
+    servo = SERVO_LOOKUP.get((eye, axis))
+    if servo is None:
+        print(f"No servo configured for {eye} {axis}.")
+        return False, 0.0
+    clamped = clamp_degrees(degrees)
+    pulse = servo["zero_pulse_us"] + servo["direction"] * clamped * SERVO_US_PER_DEGREE
+    success = set_servo_pulse(servo["channel"], pulse)
+    return success, clamped
+
+
+def move_eye_to_angles(eye, pan_deg, tilt_deg):
+    pan_ok, pan_applied = set_axis_angle(eye, "pan", pan_deg)
+    tilt_ok, tilt_applied = set_axis_angle(eye, "tilt", tilt_deg)
+
+    if pan_ok:
+        eye_angles[eye]["pan"] = pan_applied
+    if tilt_ok:
+        eye_angles[eye]["tilt"] = tilt_applied
+
+    if pan_ok or tilt_ok:
+        update_eye_status()
+
+    return pan_ok and tilt_ok
+
+
+def apply_point_selection(point_key):
+    vector = NINE_POINT_VECTORS.get(point_key)
+    if vector is None:
+        print(f"Unknown 9-pt selection: {point_key}")
         return False
 
-    success = True
-    for servo in SERVO_CONFIG:
-        channel = servo["channel"]
-        pulse = servo["zero_pulse_us"]
-        if not set_servo_pulse(channel, pulse):
-            print(f"Failed to zero {servo['name']} (channel {channel}).")
-            success = False
-        else:
-            print(f"Zeroed {servo['name']} on channel {channel} to {pulse}us.")
+    distance = get_point_distance()
+    pan_deg = vector[0] * distance
+    tilt_deg = vector[1] * distance
+    applied = False
+    for eye in get_target_eyes():
+        if move_eye_to_angles(eye, pan_deg, tilt_deg):
+            print(f"Moved {eye} eye to {point_key} ({pan_deg}°, {tilt_deg}°).")
+            applied = True
+    return applied
 
+
+def zero_servos():
+    success = True
+    for eye in EYE_KEYS:
+        if not move_eye_to_angles(eye, 0, 0):
+            print(f"Failed to zero {eye} eye.")
+            success = False
     if success:
-        status_label.text = "L: 0°, 0°  R: 0°, 0°"
+        nine_pt_options = MENU[MENU_9PT_INDEX]["options"]
+        if "C" in nine_pt_options:
+            selected_option_indices[MENU_9PT_INDEX] = nine_pt_options.index("C")
+        print("All servos centered.")
     return success
 
 def update_menu_labels():
@@ -224,7 +331,7 @@ def render_options():
         options_group.pop()
 
     section = MENU[current_menu_index]
-    if section["name"] == "Serv":
+    if section["name"] == "Settings":
         ensure_servo_controller()
 
     options = section["options"]
@@ -264,7 +371,14 @@ def render_options():
         is_current = idx == (current_option_indices[current_menu_index] or 0)
         is_selected = selected_option == idx
 
-        text = f"[{option}]" if is_current else option
+        display_text = option
+        if section["name"] == "Settings":
+            if option == "Eye":
+                display_text = f"{option}: {get_eye_selection()}"
+            elif option == "Range":
+                display_text = f"{option}: {get_point_distance()}°"
+
+        text = f"[{display_text}]" if is_current else display_text
         color = OPTION_HIGHLIGHT_COLOR if is_current else OPTION_COLOR
         if is_selected:
             color = OPTION_SELECTED_COLOR
@@ -278,6 +392,49 @@ def render_options():
             anchored_position=(x, y),
         )
         options_group.append(option_label)
+
+    if section["name"] == "Settings":
+        status_color = get_servo_status_color()
+        status_msg = servo_status
+        status_option_label = label.Label(
+            terminalio.FONT,
+            text=status_msg,
+            color=status_color,
+            scale=OPTION_LABEL_SCALE,
+            anchor_point=(0.0, 0.0),
+            anchored_position=(
+                8,
+                options_base_y + len(options) * OPTION_ROW_SPACING + 10,
+            ),
+        )
+        options_group.append(status_option_label)
+
+
+def get_eye_selection():
+    return EYE_OPTIONS[eye_selection_index]
+
+
+def cycle_eye_selection():
+    global eye_selection_index
+    eye_selection_index = (eye_selection_index + 1) % len(EYE_OPTIONS)
+
+
+def get_point_distance():
+    return POINT_DISTANCE_OPTIONS[point_distance_index]
+
+
+def cycle_point_distance():
+    global point_distance_index
+    point_distance_index = (point_distance_index + 1) % len(POINT_DISTANCE_OPTIONS)
+
+
+def get_target_eyes():
+    eye_selection = get_eye_selection()
+    if eye_selection == "L":
+        return ("L",)
+    if eye_selection == "R":
+        return ("R",)
+    return EYE_KEYS
 
 
 def cycle_menu():
@@ -308,11 +465,28 @@ def handle_selection():
         render_options()
         return
 
+    if section["name"] == "Settings":
+        option_index = current_option_indices[current_menu_index]
+        if option_index is None or option_index >= len(section["options"]):
+            return
+        selection = section["options"][option_index]
+        selected_option_indices[current_menu_index] = option_index
+        if selection == "Eye":
+            cycle_eye_selection()
+            print(f"Settings -> Eye target: {get_eye_selection()}")
+        elif selection == "Range":
+            cycle_point_distance()
+            print(f"Settings -> Range: {get_point_distance()}°")
+        render_options()
+        return
+
     option_index = current_option_indices[current_menu_index]
     if option_index is not None and section["options"]:
         selection = section["options"][option_index]
         selected_option_indices[current_menu_index] = option_index
         print(f"Selected {section['name']} -> {selection}")
+        if section["name"] == "9-pt":
+            apply_point_selection(selection)
     else:
         selected_option_indices[current_menu_index] = 0
         print(f"Selected {section['name']}")
