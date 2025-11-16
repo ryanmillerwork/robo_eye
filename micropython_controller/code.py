@@ -1,6 +1,8 @@
 import board
 import displayio
 import keypad
+import supervisor
+import sys
 import terminalio
 import time
 from adafruit_display_text import label
@@ -21,7 +23,7 @@ SERVO_CONFIG = [
         "axis": "pan",
         "channel": 4,
         "zero_pulse_us": 1490,
-        "direction": 1,  # increase is left
+        "direction": -1,  # increase is right
     },
     {
         "name": "Left tilt",
@@ -37,7 +39,7 @@ SERVO_CONFIG = [
         "axis": "pan",
         "channel": 6,
         "zero_pulse_us": 1560,
-        "direction": 1,  # increase is left
+        "direction": -1,  # increase is right
     },
     {
         "name": "Right tilt",
@@ -60,15 +62,15 @@ for servo in SERVO_CONFIG:
     SERVO_LOOKUP[(servo["eye"], servo["axis"])] = servo
 
 NINE_POINT_VECTORS = {
-    "UL": (1, 1),
+    "UL": (-1, 1),
     "UC": (0, 1),
-    "UR": (-1, 1),
-    "L": (1, 0),
+    "UR": (1, 1),
+    "L": (-1, 0),
     "C": (0, 0),
-    "R": (-1, 0),
-    "LL": (1, -1),
+    "R": (1, 0),
+    "LL": (-1, -1),
     "LC": (0, -1),
-    "LR": (-1, -1),
+    "LR": (1, -1),
 }
 POINT_DISTANCE_OPTIONS = (1, 5, 10, 20, 40)
 point_distance_index = POINT_DISTANCE_OPTIONS.index(10)
@@ -306,6 +308,90 @@ def apply_point_selection(point_key):
     return applied
 
 
+def perform_saccade(left_pan, left_tilt, right_pan, right_tilt):
+    left_pan_value = eye_angles["L"]["pan"] if left_pan is None else left_pan
+    left_tilt_value = eye_angles["L"]["tilt"] if left_tilt is None else left_tilt
+    right_pan_value = eye_angles["R"]["pan"] if right_pan is None else right_pan
+    right_tilt_value = eye_angles["R"]["tilt"] if right_tilt is None else right_tilt
+
+    left_ok = move_eye_to_angles("L", left_pan_value, left_tilt_value)
+    right_ok = move_eye_to_angles("R", right_pan_value, right_tilt_value)
+    return (
+        left_ok and right_ok,
+        (left_pan_value, left_tilt_value, right_pan_value, right_tilt_value),
+    )
+
+
+def parse_saccade_arg(token):
+    normalized = token.strip().upper()
+    if normalized in ("X", "H", "HOLD", "SKIP", "KEEP", "NC"):
+        return None
+    return float(token)
+
+
+serial_command_buffer = ""
+
+
+def handle_serial_command(command):
+    command = command.strip()
+    if not command:
+        return
+
+    parts = command.split()
+    command_key = parts[0].upper()
+    args = parts[1:]
+
+    if len(parts) == 1 and command_key in NINE_POINT_VECTORS:
+        applied = apply_point_selection(command_key)
+        if applied:
+            print(f"CMD OK 9PT {command_key}")
+        else:
+            print(f"CMD ERR 9PT {command_key}")
+        return
+
+    if command_key in ("SAC", "SACCADE"):
+        if len(args) != 4:
+            print("CMD ERR SAC needs 4 angles")
+            return
+        try:
+            left_pan, left_tilt, right_pan, right_tilt = (
+                parse_saccade_arg(value) for value in args
+            )
+        except ValueError:
+            print("CMD ERR SAC invalid angle")
+            return
+        success, applied = perform_saccade(left_pan, left_tilt, right_pan, right_tilt)
+        if success:
+            lp, lt, rp, rt = applied
+            print(f"CMD OK SAC {lp:.1f} {lt:.1f} {rp:.1f} {rt:.1f}")
+        else:
+            print("CMD ERR SAC move failed")
+        return
+
+    print(f"CMD ERR Unknown command: {command}")
+
+
+def poll_serial_commands():
+    global serial_command_buffer
+
+    if not supervisor.runtime.serial_connected:
+        serial_command_buffer = ""
+        return
+
+    while supervisor.runtime.serial_bytes_available:
+        char = sys.stdin.read(1)
+        if char in ("\n", "\r"):
+            command = serial_command_buffer.strip()
+            serial_command_buffer = ""
+            if command:
+                handle_serial_command(command)
+        else:
+            serial_command_buffer += char
+            if len(serial_command_buffer) > 64:
+                serial_command_buffer = ""
+                print("CMD ERR Line too long")
+
+
 def zero_servos():
     success = True
     for eye in EYE_KEYS:
@@ -499,6 +585,7 @@ render_options()
 print("GUI ready. Use D2 (cycle), D1 (options), D0 (select).")
 
 while True:
+    poll_serial_commands()
     for key_group, names in BUTTON_GROUPS:
         event = key_group.events.get()
         while event:

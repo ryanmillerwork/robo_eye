@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Robo Eye Serial Console</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        padding: 16px;
+        background: #0e1116;
+        color: #f5f7fb;
+      }
+      h1 {
+        font-size: 1.5rem;
+        margin-bottom: 0.5rem;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      button {
+        padding: 8px 12px;
+        font-size: 0.95rem;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        background: #2563eb;
+        color: white;
+      }
+      button.danger {
+        background: #dc2626;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      textarea {
+        width: 100%;
+        height: 240px;
+        background: #111827;
+        color: #f5f7fb;
+        border: 1px solid #1f2937;
+        border-radius: 6px;
+        padding: 8px;
+        resize: vertical;
+        font-family: "JetBrains Mono", "Fira Mono", monospace;
+      }
+      .input-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .input-row input {
+        flex: 1;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #1f2937;
+        background: #111827;
+        color: #f5f7fb;
+      }
+      .pad-section {
+        margin: 16px 0;
+        background: #111827;
+        border: 1px solid #1f2937;
+        border-radius: 8px;
+        padding: 12px;
+      }
+      .pad-header {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.9rem;
+        margin-bottom: 8px;
+        color: #cbd5f5;
+      }
+      .pad-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-size: 0.85rem;
+      }
+      canvas#pad {
+        width: 100%;
+        max-width: 360px;
+        aspect-ratio: 1 / 1;
+        display: block;
+        border-radius: 8px;
+        border: 1px solid #1f2937;
+        background: #0b1321;
+        cursor: crosshair;
+      }
+      .status {
+        margin: 8px 0;
+        font-size: 0.9rem;
+        color: #93c5fd;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Robo Eye Serial Console</h1>
+    <div class="status" id="status">Disconnected</div>
+    <div class="controls">
+      <button id="connect">Connect</button>
+      <button id="disconnect" class="danger" disabled>Disconnect</button>
+    </div>
+    <textarea id="log" readonly></textarea>
+    <div class="pad-section">
+      <div class="pad-header">
+        <strong>Pointer Pad</strong>
+        <span>Click or drag to send SAC commands (±20°)</span>
+      </div>
+      <div class="pad-controls">
+        <button id="swap-pan">Swap Left/Right</button>
+        <span id="swap-status">Normal</span>
+      </div>
+      <canvas id="pad" width="320" height="320"></canvas>
+    </div>
+    <div class="input-row">
+      <input
+        id="command"
+        type="text"
+        placeholder="Type command e.g. UR or SAC 10 -5 X X"
+      />
+      <button id="send" disabled>Send</button>
+    </div>
+    <script>
+      const logEl = document.getElementById("log");
+      const statusEl = document.getElementById("status");
+      const connectBtn = document.getElementById("connect");
+      const disconnectBtn = document.getElementById("disconnect");
+      const sendBtn = document.getElementById("send");
+      const commandInput = document.getElementById("command");
+      const padCanvas = document.getElementById("pad");
+      const padCtx = padCanvas.getContext("2d");
+      const swapButton = document.getElementById("swap-pan");
+      const swapStatus = document.getElementById("swap-status");
+
+      let port;
+      let reader;
+      let writer;
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+
+      function appendLog(message) {
+        const timestamp = new Date().toLocaleTimeString();
+        logEl.value += `[${timestamp}] ${message}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setConnectedState(isConnected) {
+        connectBtn.disabled = isConnected;
+        disconnectBtn.disabled = !isConnected;
+        sendBtn.disabled = !isConnected;
+        statusEl.textContent = isConnected ? "Connected" : "Disconnected";
+        statusEl.style.color = isConnected ? "#4ade80" : "#93c5fd";
+      }
+
+      async function connect() {
+        if (!("serial" in navigator)) {
+          appendLog("Web Serial API not available in this browser.");
+          return;
+        }
+        try {
+          port = await navigator.serial.requestPort();
+          await port.open({ baudRate: 115200 });
+          setConnectedState(true);
+          appendLog("Port opened.");
+          startReader();
+          writer = port.writable.getWriter();
+        } catch (error) {
+          appendLog(`Connect failed: ${error.message || error}`);
+        }
+      }
+
+      async function disconnect() {
+        try {
+          if (reader) {
+            await reader.cancel();
+            reader.releaseLock();
+          }
+          if (writer) {
+            writer.releaseLock();
+          }
+          if (port) {
+            await port.close();
+          }
+        } catch (error) {
+          appendLog(`Disconnect error: ${error.message || error}`);
+        } finally {
+          port = undefined;
+          reader = undefined;
+          writer = undefined;
+          setConnectedState(false);
+          appendLog("Port closed.");
+        }
+      }
+
+      async function startReader() {
+        reader = port.readable.getReader();
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+              break;
+            }
+            if (value) {
+              appendLog(decoder.decode(value));
+            }
+          }
+        } catch (error) {
+          appendLog(`Read error: ${error.message || error}`);
+        } finally {
+          reader.releaseLock();
+        }
+      }
+
+      async function writeCommand(text, { log = true } = {}) {
+        if (!text || !writer) return;
+        try {
+          await writer.write(encoder.encode(text + "\n"));
+          if (log) {
+            appendLog(`> ${text}`);
+          }
+        } catch (error) {
+          appendLog(`Write error: ${error.message || error}`);
+        }
+      }
+
+      async function sendCommand() {
+        const text = commandInput.value.trim();
+        if (!text) return;
+        await writeCommand(text);
+        commandInput.value = "";
+      }
+
+      connectBtn.addEventListener("click", connect);
+      disconnectBtn.addEventListener("click", disconnect);
+      sendBtn.addEventListener("click", sendCommand);
+      commandInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          sendCommand();
+        }
+      });
+
+      // --- Pointer pad logic --------------------------------------------------
+      const PAD_RANGE = 20;
+      let padActive = false;
+      let lastPadPan = null;
+      let lastPadTilt = null;
+      let lastPadSent = 0;
+      const PAD_COOLDOWN_MS = 100;
+      let swapPan = false;
+
+      function resizePadCanvas() {
+        const displaySize = padCanvas.clientWidth || 320;
+        padCanvas.width = displaySize;
+        padCanvas.height = displaySize;
+        drawPad(0, 0, false);
+      }
+
+      function drawPad(pan = 0, tilt = 0, showDot = false) {
+        const width = padCanvas.width;
+        const height = padCanvas.height;
+        padCtx.clearRect(0, 0, width, height);
+        padCtx.fillStyle = "#0b1321";
+        padCtx.fillRect(0, 0, width, height);
+        padCtx.strokeStyle = "#1f2a40";
+        padCtx.lineWidth = 1;
+        padCtx.beginPath();
+        padCtx.moveTo(width / 2, 0);
+        padCtx.lineTo(width / 2, height);
+        padCtx.moveTo(0, height / 2);
+        padCtx.lineTo(width, height / 2);
+        padCtx.stroke();
+        padCtx.strokeStyle = "#334155";
+        padCtx.strokeRect(0, 0, width, height);
+        if (showDot) {
+          const x = ((pan / (PAD_RANGE * 2)) + 0.5) * width;
+          const y = ((-tilt / (PAD_RANGE * 2)) + 0.5) * height;
+          padCtx.beginPath();
+          padCtx.arc(x, y, 6, 0, Math.PI * 2);
+          padCtx.fillStyle = "#38bdf8";
+          padCtx.fill();
+          padCtx.strokeStyle = "#0ea5e9";
+          padCtx.stroke();
+        }
+      }
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function computeAngles(event) {
+        const rect = padCanvas.getBoundingClientRect();
+        const x = (event.clientX - rect.left) / rect.width;
+        const y = (event.clientY - rect.top) / rect.height;
+        const pan = clamp((x - 0.5) * 2 * PAD_RANGE, -PAD_RANGE, PAD_RANGE);
+        const tilt = clamp((0.5 - y) * 2 * PAD_RANGE, -PAD_RANGE, PAD_RANGE);
+        return { pan, tilt };
+      }
+
+      async function sendPadCommand(event) {
+        if (!writer) {
+          appendLog("Connect first to use the pad.");
+          return;
+        }
+        let { pan, tilt } = computeAngles(event);
+        if (swapPan) {
+          pan = -pan;
+        }
+        drawPad(pan, tilt, true);
+        const now = performance.now();
+        const changed =
+          lastPadPan === null ||
+          Math.abs(pan - lastPadPan) > 0.2 ||
+          Math.abs(tilt - lastPadTilt) > 0.2;
+        if (!changed || now - lastPadSent < PAD_COOLDOWN_MS) return;
+        lastPadPan = pan;
+        lastPadTilt = tilt;
+        lastPadSent = now;
+        const cmd = `SAC ${pan.toFixed(1)} ${tilt.toFixed(1)} ${pan.toFixed(1)} ${tilt.toFixed(1)}`;
+        await writeCommand(cmd, { log: false });
+        appendLog(`> PAD ${cmd}`);
+      }
+
+      padCanvas.addEventListener("pointerdown", (event) => {
+        if (!writer) {
+          appendLog("Connect first to use the pad.");
+          return;
+        }
+        padActive = true;
+        padCanvas.setPointerCapture(event.pointerId);
+        sendPadCommand(event);
+      });
+
+      padCanvas.addEventListener("pointermove", (event) => {
+        if (!padActive) return;
+        event.preventDefault();
+        sendPadCommand(event);
+      });
+
+      function endPadInteraction(event) {
+        if (!padActive) return;
+        padActive = false;
+        lastPadPan = null;
+        lastPadTilt = null;
+        padCanvas.releasePointerCapture(event.pointerId);
+        drawPad(0, 0, false);
+      }
+
+      padCanvas.addEventListener("pointerup", endPadInteraction);
+      padCanvas.addEventListener("pointercancel", endPadInteraction);
+      padCanvas.addEventListener("pointerleave", () => {
+        if (!padActive) drawPad(0, 0, false);
+      });
+
+      swapButton.addEventListener("click", () => {
+        swapPan = !swapPan;
+        swapStatus.textContent = swapPan ? "Left/Right swapped" : "Normal";
+        drawPad(0, 0, false);
+      });
+
+      window.addEventListener("resize", resizePadCanvas);
+      resizePadCanvas();
+      setConnectedState(false);
+    </script>
+  </body>
+</html>
+
