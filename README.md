@@ -1,9 +1,10 @@
 ## Robo Eye Controller
 
-This project drives a pair of fake eyes using an Adafruit ESP32-S2 Reverse TFT board with a PCA9685 Servo FeatherWing. It offers two simultaneous control surfaces:
+This project drives a pair of fake eyes using an Adafruit ESP32-S2 Reverse TFT board with a PCA9685 Servo FeatherWing. It offers multiple simultaneous control surfaces:
 
 - A built-in touchscreen UI with the hardware buttons on the ESP32-S2.
 - A USB serial command interface so a laptop or Android device can issue scripted eye motions.
+- A browser-based console (Web Serial) for logging, quick commands, and freehand eye steering.
 
 ### Hardware
 
@@ -59,6 +60,21 @@ Available commands (case-insensitive):
    `CMD OK SAC 10.0 -5.0 0.0 0.0`
 
 Serial responses always start with `CMD OK` or `CMD ERR` so host scripts can parse them easily.
+
+### Web UI (Browser Serial Console)
+
+Located in `micropython_controller/web_ui/index.html`. Features:
+
+- Connect/disconnect via Chrome/Edge Web Serial dialog.
+- Scrollback log showing board output plus `CMD OK/ERR` responses.
+- Command input box and quick logging of manual entries.
+- Pointer pad that maps the full square to ±20° pan/tilt. Click or drag to stream `SAC` commands for both eyes (throttled to one command per 100 ms). Includes a toggle to swap left/right pan directions if you want mirrored motion.
+
+Usage tips:
+
+1. Serve the folder locally (`cd micropython_controller/web_ui && python -m http.server 8000`) and open `http://localhost:8000` in Chrome.
+2. Click **Connect**, pick the ESP32 device, then use the pointer pad or text box to drive the eyes.
+3. You can also open the HTML directly from the board’s CIRCUITPY drive in Chrome (needs Web Serial support).
 
 ### Development Notes
 
